@@ -1,0 +1,464 @@
+// Billing Service Prisma Schema
+// Microservice for invoices, payments, coupons, and tax calculations
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+// Invoice status
+enum InvoiceStatus {
+  DRAFT           // Being prepared
+  PENDING         // Awaiting payment
+  SENT            // Sent to client
+  PARTIALLY_PAID  // Partial payment received
+  PAID            // Fully paid
+  OVERDUE         // Past due date
+  CANCELLED       // Cancelled
+  REFUNDED        // Fully refunded
+  VOID            // Voided
+}
+
+// Payment status
+enum PaymentStatus {
+  PENDING         // Awaiting processing
+  PROCESSING      // Being processed by gateway
+  COMPLETED       // Successfully completed
+  FAILED          // Payment failed
+  REFUNDED        // Full refund
+  PARTIALLY_REFUNDED // Partial refund
+  CANCELLED       // Cancelled before processing
+  DISPUTED        // Under dispute
+}
+
+// Payment method
+enum PaymentMethod {
+  CREDIT_CARD
+  DEBIT_CARD
+  BANK_TRANSFER
+  UPI
+  NET_BANKING
+  WALLET
+  CHEQUE
+  CASH
+  RAZORPAY
+  STRIPE
+  PAYPAL
+  OTHER
+}
+
+// Coupon type
+enum CouponType {
+  PERCENTAGE      // Percentage discount
+  FIXED_AMOUNT    // Fixed amount discount
+  FREE_TRIAL      // Free trial period
+  FIRST_MONTH_FREE
+}
+
+// Coupon status
+enum CouponStatus {
+  ACTIVE
+  INACTIVE
+  EXPIRED
+  EXHAUSTED       // Max uses reached
+}
+
+// =============================================================================
+// INVOICE MODEL
+// Main invoice entity with denormalized client data
+// =============================================================================
+model Invoice {
+  id              String         @id @default(cuid())
+  invoiceNumber   String         @unique  // INV-2026-0001
+  
+  // === DENORMALIZED CLIENT DATA ===
+  clientId        String
+  clientName      String                  // From Client Service
+  clientEmail     String?                 // From Client Service
+  clientPhone     String?
+  clientCompany   String?
+  
+  // === BILLING ADDRESS ===
+  billingAddress  String?
+  billingCity     String?
+  billingState    String?
+  billingCountry  String?        @default("India")
+  billingZipCode  String?
+  gstin           String?                 // GST Number
+  
+  // === ORDER/SUBSCRIPTION REFERENCE ===
+  orderId         String?                 // From Order Service
+  orderNumber     String?
+  subscriptionId  String?                 // From Subscription Service
+  
+  // === INVOICE DETAILS ===
+  invoiceDate     DateTime       @default(now())
+  dueDate         DateTime
+  periodStart     DateTime?               // Billing period start
+  periodEnd       DateTime?               // Billing period end
+  
+  // === STATUS ===
+  status          InvoiceStatus  @default(DRAFT)
+  
+  // === AMOUNTS ===
+  subtotal        Decimal        @db.Decimal(12, 2)
+  
+  // Discount
+  discountPercent Decimal        @default(0) @db.Decimal(5, 2)
+  discountAmount  Decimal        @default(0) @db.Decimal(12, 2)
+  couponId        String?
+  couponCode      String?
+  couponDiscount  Decimal        @default(0) @db.Decimal(12, 2)
+  
+  // Tax
+  taxPercent      Decimal        @default(18) @db.Decimal(5, 2)
+  taxAmount       Decimal        @default(0) @db.Decimal(12, 2)
+  cgst            Decimal        @default(0) @db.Decimal(12, 2)  // Central GST
+  sgst            Decimal        @default(0) @db.Decimal(12, 2)  // State GST
+  igst            Decimal        @default(0) @db.Decimal(12, 2)  // Integrated GST
+  
+  // Final amounts
+  totalAmount     Decimal        @db.Decimal(12, 2)
+  paidAmount      Decimal        @default(0) @db.Decimal(12, 2)
+  balanceAmount   Decimal        @default(0) @db.Decimal(12, 2)
+  currency        String         @default("INR")
+  
+  // === NOTES ===
+  notes           String?
+  termsAndConditions String?
+  internalNotes   String?
+  
+  // === SENDING ===
+  sentAt          DateTime?
+  sentBy          String?
+  sentByName      String?
+  
+  // === PAYMENT ===
+  paidAt          DateTime?
+  
+  // === CANCELLATION ===
+  cancelledAt     DateTime?
+  cancelReason    String?
+  cancelledById   String?
+  cancelledByName String?
+  
+  // === PDF ===
+  pdfUrl          String?
+  pdfGeneratedAt  DateTime?
+  
+  // === METADATA ===
+  createdById     String?
+  createdByName   String?
+  updatedById     String?
+  updatedByName   String?
+  
+  // === RELATIONS ===
+  items           InvoiceItem[]
+  payments        Payment[]
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([clientId])
+  @@index([orderId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([invoiceDate])
+  @@index([dueDate])
+  @@map("invoices")
+}
+
+// =============================================================================
+// INVOICE ITEM MODEL
+// Line items for invoices
+// =============================================================================
+model InvoiceItem {
+  id              String   @id @default(cuid())
+  invoiceId       String
+  
+  // === DENORMALIZED PRODUCT DATA ===
+  productId       String?
+  productName     String
+  productCode     String?
+  
+  // === DENORMALIZED LICENSE TYPE DATA ===
+  licenseTypeId   String?
+  licenseTypeName String?
+  
+  // === ITEM DETAILS ===
+  description     String?
+  quantity        Int      @default(1)
+  unitPrice       Decimal  @db.Decimal(10, 2)
+  
+  // === DISCOUNTS ===
+  discountPercent Decimal  @default(0) @db.Decimal(5, 2)
+  discountAmount  Decimal  @default(0) @db.Decimal(10, 2)
+  
+  // === TAX ===
+  taxPercent      Decimal  @default(18) @db.Decimal(5, 2)
+  taxAmount       Decimal  @default(0) @db.Decimal(10, 2)
+  
+  // === TOTALS ===
+  subtotal        Decimal  @db.Decimal(10, 2)  // quantity * unitPrice
+  total           Decimal  @db.Decimal(10, 2)  // subtotal - discount + tax
+  
+  // === PERIOD (for subscription items) ===
+  periodStart     DateTime?
+  periodEnd       DateTime?
+  
+  // === RELATIONS ===
+  invoice         Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([productId])
+  @@map("invoice_items")
+}
+
+// =============================================================================
+// PAYMENT MODEL
+// Payment transactions
+// =============================================================================
+model Payment {
+  id              String        @id @default(cuid())
+  paymentNumber   String        @unique  // PAY-2026-0001
+  
+  // === DENORMALIZED CLIENT DATA ===
+  clientId        String
+  clientName      String
+  clientEmail     String?
+  
+  // === REFERENCES ===
+  invoiceId       String?
+  orderId         String?
+  subscriptionId  String?
+  
+  // === PAYMENT DETAILS ===
+  amount          Decimal       @db.Decimal(12, 2)
+  currency        String        @default("INR")
+  method          PaymentMethod @default(OTHER)
+  
+  // === STATUS ===
+  status          PaymentStatus @default(PENDING)
+  
+  // === GATEWAY INFO ===
+  gatewayName     String?       // razorpay, stripe, etc.
+  gatewayTxnId    String?       // Transaction ID from gateway
+  gatewayOrderId  String?       // Order ID from gateway
+  gatewayPaymentId String?      // Payment ID from gateway
+  gatewayResponse Json?         // Full gateway response
+  
+  // === BANK DETAILS (for bank transfer) ===
+  bankName        String?
+  bankAccount     String?
+  bankReference   String?
+  
+  // === CHEQUE DETAILS ===
+  chequeNumber    String?
+  chequeDate      DateTime?
+  chequeBank      String?
+  
+  // === REFUND INFO ===
+  refundedAmount  Decimal       @default(0) @db.Decimal(12, 2)
+  refundReason    String?
+  refundedAt      DateTime?
+  refundedById    String?
+  refundedByName  String?
+  
+  // === PROCESSING ===
+  processedAt     DateTime?
+  processedById   String?
+  processedByName String?
+  
+  // === FAILURE INFO ===
+  failureReason   String?
+  failureCode     String?
+  
+  // === NOTES ===
+  notes           String?
+  internalNotes   String?
+  
+  // === METADATA ===
+  createdById     String?
+  createdByName   String?
+  
+  // === RELATIONS ===
+  invoice         Invoice?      @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([clientId])
+  @@index([invoiceId])
+  @@index([orderId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([gatewayTxnId])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+// =============================================================================
+// COUPON MODEL
+// Discount coupons and promo codes
+// =============================================================================
+model Coupon {
+  id              String       @id @default(cuid())
+  code            String       @unique
+  name            String
+  description     String?
+  
+  // === COUPON TYPE ===
+  type            CouponType   @default(PERCENTAGE)
+  value           Decimal      @db.Decimal(10, 2)  // Percentage or fixed amount
+  maxDiscount     Decimal?     @db.Decimal(10, 2)  // Max discount for percentage coupons
+  minOrderAmount  Decimal?     @db.Decimal(10, 2)  // Minimum order amount to apply
+  
+  // === VALIDITY ===
+  status          CouponStatus @default(ACTIVE)
+  startDate       DateTime     @default(now())
+  endDate         DateTime?
+  
+  // === USAGE LIMITS ===
+  maxUses         Int?                              // Total uses allowed
+  maxUsesPerClient Int?        @default(1)          // Uses per client
+  currentUses     Int          @default(0)          // Current usage count
+  
+  // === APPLICABILITY ===
+  applicableProducts String[]  @default([])         // Product IDs (empty = all)
+  applicableLicenseTypes String[] @default([])      // License type IDs (empty = all)
+  applicableClients String[]   @default([])         // Client IDs (empty = all)
+  
+  // === FLAGS ===
+  isFirstPurchaseOnly Boolean  @default(false)
+  isRenewalApplicable Boolean  @default(false)
+  isStackable     Boolean      @default(false)      // Can combine with other coupons
+  
+  // === METADATA ===
+  createdById     String?
+  createdByName   String?
+  
+  // === RELATIONS ===
+  usages          CouponUsage[]
+  
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@index([code])
+  @@index([status])
+  @@index([startDate])
+  @@index([endDate])
+  @@map("coupons")
+}
+
+// =============================================================================
+// COUPON USAGE MODEL
+// Track coupon usage by clients
+// =============================================================================
+model CouponUsage {
+  id              String   @id @default(cuid())
+  couponId        String
+  
+  // === CLIENT INFO ===
+  clientId        String
+  clientName      String
+  
+  // === USAGE DETAILS ===
+  orderId         String?
+  invoiceId       String?
+  subscriptionId  String?
+  
+  discountAmount  Decimal  @db.Decimal(10, 2)  // Actual discount applied
+  
+  // === RELATIONS ===
+  coupon          Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  
+  usedAt          DateTime @default(now())
+
+  @@index([couponId])
+  @@index([clientId])
+  @@index([usedAt])
+  @@map("coupon_usages")
+}
+
+// =============================================================================
+// TAX CONFIGURATION MODEL
+// Tax rates and rules
+// =============================================================================
+model TaxConfig {
+  id              String   @id @default(cuid())
+  name            String                           // "GST 18%", "GST 12%"
+  code            String   @unique                 // "GST_18", "GST_12"
+  
+  // === TAX RATES ===
+  rate            Decimal  @db.Decimal(5, 2)       // Total tax rate
+  cgstRate        Decimal  @default(0) @db.Decimal(5, 2)  // CGST rate
+  sgstRate        Decimal  @default(0) @db.Decimal(5, 2)  // SGST rate
+  igstRate        Decimal  @default(0) @db.Decimal(5, 2)  // IGST rate
+  
+  // === APPLICABILITY ===
+  country         String   @default("India")
+  states          String[] @default([])            // Applicable states
+  isDefault       Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  
+  // === DESCRIPTION ===
+  description     String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([code])
+  @@index([isActive])
+  @@map("tax_configs")
+}
+
+// =============================================================================
+// PAYMENT GATEWAY CONFIG MODEL
+// Payment gateway settings
+// =============================================================================
+model PaymentGatewayConfig {
+  id              String   @id @default(cuid())
+  name            String                           // "Razorpay", "Stripe"
+  code            String   @unique                 // "razorpay", "stripe"
+  
+  // === CREDENTIALS (encrypted in production) ===
+  apiKey          String?
+  apiSecret       String?
+  webhookSecret   String?
+  merchantId      String?
+  
+  // === SETTINGS ===
+  isActive        Boolean  @default(false)
+  isDefault       Boolean  @default(false)
+  testMode        Boolean  @default(true)
+  
+  // === SUPPORTED METHODS ===
+  supportedMethods String[] @default([])           // ["credit_card", "upi", "net_banking"]
+  
+  // === FEES ===
+  transactionFeePercent Decimal @default(0) @db.Decimal(5, 2)
+  transactionFeeFixed   Decimal @default(0) @db.Decimal(10, 2)
+  
+  // === URLS ===
+  callbackUrl     String?
+  webhookUrl      String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([code])
+  @@index([isActive])
+  @@map("payment_gateway_configs")
+}
